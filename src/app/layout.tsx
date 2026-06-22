@@ -63,7 +63,7 @@ export default async function RootLayout({
     process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true';
   let danmakuApiBaseUrl =
     process.env.NEXT_PUBLIC_DANMU_API_BASE_URL ||
-    '';
+     '';
   let autoUpdateEnabled = false;
   if (storageType !== 'localstorage') {
     const config = await getConfig();
@@ -90,7 +90,34 @@ export default async function RootLayout({
     DOUBAN_IMAGE_PROXY: doubanImageProxy,
     DISABLE_YELLOW_FILTER: disableYellowFilter,
     DANMU_API_BASE_URL: danmakuApiBaseUrl,
+    CUSTOM_AD_FILTER_VERSION: 0, // 强制将外部可能下发的动态广告配置过滤版本归零
   };
+
+  // ---------------------------------------------------------
+  // 核心防御逻辑：硬编码全自动黑产广告高频爆破器
+  // ---------------------------------------------------------
+  const antiAdScript = `
+    window.RUNTIME_CONFIG = ${JSON.stringify(runtimeConfig)};
+    (function() {
+      var evilKeywords = ['kaiyuan', 'kyqp', 'qipai', 'pgsoft', 'vnsr', 'bocai', 'bet', 'casino', 'agqp', 'obty', 'amvn', 'slots'];
+      function killEvilAds() {
+        document.querySelectorAll('img, a, div, iframe, amp-img').forEach(function(el) {
+          var matchesEvil = false;
+          if (el.href && evilKeywords.some(function(kw) { return el.href.toLowerCase().includes(kw); })) matchesEvil = true;
+          if (el.src && evilKeywords.some(function(kw) { return el.src.toLowerCase().includes(kw); })) matchesEvil = true;
+          if (el.textContent && (el.textContent.includes('棋牌') || el.textContent.includes('电子盘') || el.textContent.includes('威尼斯人') || el.textContent.includes('充值送'))) {
+            var style = window.getComputedStyle(el);
+            if (style.position === 'fixed' || style.position === 'absolute' || el.tagName === 'A' || el.tagName === 'IMG') {
+              matchesEvil = true;
+            }
+          }
+          if (matchesEvil) { el.remove(); }
+        });
+      }
+      setInterval(killEvilAds, 300);
+      document.addEventListener('DOMContentLoaded', killEvilAds);
+    })();
+  `;
 
   return (
     <html lang='zh-CN' suppressHydrationWarning>
@@ -100,11 +127,11 @@ export default async function RootLayout({
           content='width=device-width, initial-scale=1.0, viewport-fit=cover'
         />
         <link rel='apple-touch-icon' href='/icons/icon-192x192.png' />
-        {/* 将配置序列化后直接写入脚本，浏览器端可通过 window.RUNTIME_CONFIG 获取 */}
+        {/* 将配置序列化和反黑产脚本直接合并写入，在浏览器端全平台生效 */}
         {/* eslint-disable-next-line @next/next/no-sync-scripts */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `window.RUNTIME_CONFIG = ${JSON.stringify(runtimeConfig)};`,
+            __html: antiAdScript,
           }}
         />
       </head>
