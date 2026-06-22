@@ -1,10 +1,123 @@
 /* eslint-disable */
 
+// 全局引入我们精心调校的去广告清洗函数
+function filterAdsFromM3U8(m3u8Content, env) {
+  if (!m3u8Content) return '';
+
+  // 1. 广告特征黑名单（完美融合开元棋牌、PG电子等）
+  let basePatterns = [
+    /doubleclick\.net/i, /googlesyndication\.com/i, /googleads/i, /adservice/i,
+    /cdn\-ad\./i, /\dadvertisment\b/i, /_ad\.ts/i, /\.ad\./i,
+    /kaiyuan/i, /\bky\b/i, /qipai/i, /\bqp\b/i, /kyqp/i,
+    /\bpg\b/i, /pgdianz[i]?/i, /pgsoft/i, /pocketgame/i, /slots/i,
+    /vnsr/i, /bocai/i, /amvn/i, /bet\d+/i, /casino/i, /\bag\b/i, /\bob\b/i,
+    /guanggao/i, /[\/\-_]ad[s]?[\/\-_]/i
+  ];
+
+  // 动态读取 Cloudflare 后台配置的 CUSTOM_AD_WORDS 变量
+  if (env && env.CUSTOM_AD_WORDS) {
+    const customWords = env.CUSTOM_AD_WORDS.split(',');
+    customWords.forEach(word => {
+      if (word.trim()) {
+        basePatterns.push(new RegExp(word.trim(), 'i'));
+      }
+    });
+  }
+
+  // 动态读取开头强制切除时长，没有配置就默认 7.5 秒
+  const TARGET_AD_TIME = env && env.TARGET_AD_TIME ? parseFloat(env.TARGET_AD_TIME) : 7.5;
+
+  // 广告流标签黑名单
+  const adTags = ['#EXT-X-CUE-OUT', '#EXT-X-CUE-IN', '#EXT-X-CUE', '#EXT-OATCLS-SCTE35', '#EXT-X-DATERANGE'];
+
+  const lines = m3u8Content.split(/\r?\n/);
+  const outputLines = [];
+  
+  let i = 0;
+  let skipNextSegment = false; 
+  let accumulatedTime = 0;
+  let hasSkippedIntro = false;  
+
+  while (i < lines.length) {
+    let line = lines[i].trim();
+    if (!line) { i++; continue; }
+
+    // 保留 M3U8 必要的基础头部格式标记
+    if (line.startsWith('#EXTM3U') || line.startsWith('#EXT-X-VERSION') || line.startsWith('#EXT-X-TARGETDURATION') || line.startsWith('#EXT-X-MEDIA-SEQUENCE') || line.startsWith('#EXT-X-PLAYLIST-TYPE')) {
+      outputLines.push(lines[i]);
+      i++;
+      continue;
+    }
+
+    // 标签过滤
+    let isAdTag = adTags.some(tag => line.startsWith(tag));
+    if (isAdTag) {
+      if (line.startsWith('#EXT-X-CUE-OUT') || line.startsWith('#EXT-X-DATERANGE')) {
+        skipNextSegment = true;
+      }
+      i++; continue; 
+    }
+
+    if (line.startsWith('#EXT-X-CUE-IN')) {
+      skipNextSegment = false;
+      i++; continue;
+    }
+
+    // 处理切片
+    if (line.startsWith('#EXTINF:')) {
+      const durationMatch = line.match(/#EXTINF:([0-9.]+)/);
+      const currentDuration = durationMatch ? parseFloat(durationMatch[1]) : 0;
+
+      let nextLineIndex = i + 1;
+      let urlLine = '';
+      while (nextLineIndex < lines.length && lines[nextLineIndex].trim().startsWith('#')) {
+        nextLineIndex++;
+      }
+      if (nextLineIndex < lines.length) {
+        urlLine = lines[nextLineIndex].trim();
+      }
+
+      let isAdUrl = basePatterns.some(pattern => pattern.test(urlLine));
+      let isIntroAd = false;                                          
+
+      // 开头7秒强制时间拦截
+      if (!hasSkippedIntro) {
+        if (accumulatedTime + currentDuration <= TARGET_AD_TIME + 2) {
+          accumulatedTime += currentDuration;
+          isIntroAd = true; 
+        } else {
+          hasSkippedIntro = true; 
+        }
+      }
+
+      if (isAdUrl || isIntroAd || skipNextSegment) {
+        i = nextLineIndex + 1; 
+        continue;
+      }
+    }
+
+    // 纯行 URL 兜底过滤
+    if (/^https?:\/\//i.test(line) || (!line.startsWith('#') && (line.endsWith('.ts') || line.includes('.m4s') || line.includes('.mp4')))) {
+      let isAdUrl = basePatterns.some(pattern => pattern.test(line));
+      if (isAdUrl) {
+        i++;
+        continue;
+      }
+    }
+
+    outputLines.push(lines[i]);
+    i++;
+  }
+
+  return outputLines.join('\n');
+}
+
 addEventListener('fetch', (event) => {
-  event.respondWith(handleRequest(event.request));
+  // 将全局的 context 绑定带入请求处理器中
+  event.respondWith(handleRequest(event.request, typeof globalThis !== 'undefined' ? globalThis : {}));
 });
 
-async function handleRequest(request) {
+async function handleRequest(request, env) {
   try {
     const url = new URL(request.url);
 
@@ -47,9 +160,17 @@ async function handleRequest(request) {
     // 处理重定向
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       body = response.body;
-      // 创建新的 Response 对象以修改 Location 头部
       return handleRedirect(response, body);
-    } else if (response.headers.get('Content-Type')?.includes('text/html')) {
+    } 
+    
+    // 拦截并清洗 M3U8 播放列表
+    else if (actualUrlStr.includes('.m3u8') || response.headers.get('Content-Type')?.includes('mpegurl') || response.headers.get('Content-Type')?.includes('application/vnd.apple.mpegurl')) {
+      let m3u8Content = await response.text();
+      m3u8Content = filterAdsFromM3U8(m3u8Content, env);
+      body = m3u8Content;
+    } 
+    
+    else if (response.headers.get('Content-Type')?.includes('text/html')) {
       body = await handleHtmlContent(
         response,
         url.protocol,
@@ -65,6 +186,10 @@ async function handleRequest(request) {
       headers: response.headers,
     });
 
+    if (actualUrlStr.includes('.m3u8')) {
+      modifiedResponse.headers.delete('content-length');
+    }
+
     // 添加禁用缓存的头部
     setNoCacheHeaders(modifiedResponse.headers);
 
@@ -73,7 +198,6 @@ async function handleRequest(request) {
 
     return modifiedResponse;
   } catch (error) {
-    // 如果请求目标地址时出现错误，返回带有错误消息的响应和状态码 500（服务器错误）
     return jsonResponse(
       {
         error: error.message,
@@ -83,14 +207,12 @@ async function handleRequest(request) {
   }
 }
 
-// 确保 URL 带有协议
 function ensureProtocol(url, defaultProtocol) {
   return url.startsWith('http://') || url.startsWith('https://')
     ? url
     : defaultProtocol + '//' + url;
 }
 
-// 处理重定向
 function handleRedirect(response, body) {
   const location = new URL(response.headers.get('location'));
   const modifiedLocation = `/${encodeURIComponent(location.toString())}`;
@@ -104,7 +226,6 @@ function handleRedirect(response, body) {
   });
 }
 
-// 处理 HTML 内容中的相对路径
 async function handleHtmlContent(response, protocol, host, actualUrlStr) {
   const originalText = await response.text();
   const regex = new RegExp('((href|src|action)=["\'])/(?!/)', 'g');
@@ -118,13 +239,11 @@ async function handleHtmlContent(response, protocol, host, actualUrlStr) {
   return modifiedText;
 }
 
-// 替换 HTML 内容中的相对路径
 function replaceRelativePaths(text, protocol, host, origin) {
   const regex = new RegExp('((href|src|action)=["\'])/(?!/)', 'g');
   return text.replace(regex, `$1${protocol}//${host}/${origin}/`);
 }
 
-// 返回 JSON 格式的响应
 function jsonResponse(data, status) {
   return new Response(JSON.stringify(data), {
     status: status,
@@ -134,24 +253,20 @@ function jsonResponse(data, status) {
   });
 }
 
-// 过滤请求头
 function filterHeaders(headers, filterFunc) {
   return new Headers([...headers].filter(([name]) => filterFunc(name)));
 }
 
-// 设置禁用缓存的头部
 function setNoCacheHeaders(headers) {
   headers.set('Cache-Control', 'no-store');
 }
 
-// 设置 CORS 头部
 function setCorsHeaders(headers) {
   headers.set('Access-Control-Allow-Origin', '*');
   headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
   headers.set('Access-Control-Allow-Headers', '*');
 }
 
-// 返回根目录的 HTML
 function getRootHtml() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
