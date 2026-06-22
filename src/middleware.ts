@@ -7,6 +7,23 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // ---------------------------------------------------------
+  // 【新加入：黑产广告主动净化拦截器】
+  // ---------------------------------------------------------
+  // 如果请求来自于 TVBox 或者是影视 API 接口
+  if (pathname.startsWith('/api/tvbox') || pathname.startsWith('/api/douban')) {
+    // 拦截可能包含黑产广告特征或特定统计、通告的恶意请求倾向
+    const searchParams = request.nextUrl.searchParams.toString().toLowerCase();
+    const evilKeywords = ['kaiyuan', 'kyqp', 'qipai', 'pgsoft', 'vnsr', 'bocai', 'casino', 'obty'];
+    
+    if (evilKeywords.some(kw => searchParams.includes(kw))) {
+      return new NextResponse(JSON.stringify({ code: 200, msg: "Ad Blocked", data: {}, ads: [], danmu: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+  }
+
   // 跳过不需要认证的路径
   if (shouldSkipAuth(pathname)) {
     return NextResponse.next();
@@ -74,6 +91,7 @@ async function verifySignature(
     const key = await crypto.subtle.importKey(
       'raw',
       keyData,
+      { name: 'HMAC', hash: 'SHA-256' },
       { name: 'HMAC', hash: 'SHA-256' },
       false,
       ['verify']
